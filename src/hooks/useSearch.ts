@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { vaultSetItem } from '../services/persistentStorage';
 import {
   getTrending,
   isDescriptiveQuery,
@@ -43,11 +44,7 @@ export function useSearch(hasApiKey: boolean) {
   const requestSeqRef = useRef(0);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(RECENT_SEARCHES_KEY, JSON.stringify(recentSearches));
-    } catch {
-      // ignore
-    }
+    vaultSetItem(RECENT_SEARCHES_KEY, JSON.stringify(recentSearches));
   }, [recentSearches]);
 
   useEffect(() => {

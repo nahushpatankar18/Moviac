@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { vaultSetItem } from '../services/persistentStorage';
 import { GENRE_CHIPS } from '../services/tmdb';
 import { GenreChipId, MediaType, TmdbMediaItem, WatchlistEntry } from '../types/tmdb';
 
@@ -26,11 +27,7 @@ function readList(key: string): WatchlistEntry[] {
 }
 
 function writeList(key: string, items: WatchlistEntry[]): void {
-  try {
-    localStorage.setItem(key, JSON.stringify(items));
-  } catch {
-    // ignore quota errors
-  }
+  vaultSetItem(key, JSON.stringify(items));
 }
 
 function readAffinity(): Record<string, number> {
@@ -109,11 +106,7 @@ export function useWatchlist() {
   }, [watchedSeries]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(KEYS.genreAffinity, JSON.stringify(genreAffinity));
-    } catch {
-      // ignore
-    }
+    vaultSetItem(KEYS.genreAffinity, JSON.stringify(genreAffinity));
   }, [genreAffinity]);
 
   const recordGenreSelection = useCallback((chipIds: GenreChipId[]) => {

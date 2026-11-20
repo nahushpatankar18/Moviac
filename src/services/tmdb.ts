@@ -10,6 +10,7 @@ import {
   TmdbPersonResult,
   TmdbVideo,
 } from '../types/tmdb';
+import { vaultRemoveItem, vaultSetItem } from './persistentStorage';
 
 const BASE_URL = 'https://api.themoviedb.org/3';
 const API_KEY_STORAGE_KEY = 'cinedeck_tmdb_api_key';
@@ -170,12 +171,12 @@ export function getStoredApiKey(): string {
 }
 
 export function saveApiKey(key: string): void {
-  localStorage.setItem(API_KEY_STORAGE_KEY, key.trim());
+  vaultSetItem(API_KEY_STORAGE_KEY, key.trim());
   clearTmdbCache();
 }
 
 export function clearApiKey(): void {
-  localStorage.removeItem(API_KEY_STORAGE_KEY);
+  vaultRemoveItem(API_KEY_STORAGE_KEY);
   clearTmdbCache();
 }
 

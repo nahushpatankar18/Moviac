@@ -2,7 +2,10 @@ import {createRoot} from 'react-dom/client';
 import {registerSW} from 'virtual:pwa-register';
 import App from './App.tsx';
 import './index.css';
+import {restoreVaultToLocalStorage} from './services/persistentStorage';
 
 registerSW({immediate: true});
 
-createRoot(document.getElementById('root')!).render(<App />);
+restoreVaultToLocalStorage().finally(() => {
+  createRoot(document.getElementById('root')!).render(<App />);
+});
