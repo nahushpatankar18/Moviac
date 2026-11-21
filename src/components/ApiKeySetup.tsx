@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { motion } from 'motion/react';
-import { Film, KeyRound, ShieldCheck, AlertCircle, ExternalLink, X } from 'lucide-react';
+import { Film, KeyRound, ShieldCheck, AlertCircle, ExternalLink, X, Cloud, Loader2 } from 'lucide-react';
+import { useFirebaseAuth } from '../contexts/FirebaseContext';
 import { saveApiKey, validateApiKey } from '../services/tmdb';
 
 interface ApiKeySetupProps {
@@ -19,6 +20,7 @@ export const ApiKeySetup: React.FC<ApiKeySetupProps> = ({
   const [apiKey, setApiKey] = useState(initialKey);
   const [validating, setValidating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { user, signingIn, authError, loginWithGoogle, logout } = useFirebaseAuth();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -124,10 +126,45 @@ export const ApiKeySetup: React.FC<ApiKeySetupProps> = ({
       </form>
 
       <div className="mt-6 space-y-3 border-t border-white/10 pt-5 text-xs leading-relaxed text-slate-300">
+        <div className="rounded-2xl border border-white/10 bg-white/5 p-3.5 space-y-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-slate-200 font-medium">
+              <Cloud className="h-4 w-4 text-cyan-300 shrink-0" />
+              <span>
+                {user
+                  ? `Synced with ${user.email}`
+                  : 'Sync lists & key permanently with Gmail'}
+              </span>
+            </div>
+            {user ? (
+              <button
+                type="button"
+                onClick={() => void logout()}
+                className="text-rose-300 hover:text-rose-200 font-semibold shrink-0"
+              >
+                Sign out
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={signingIn}
+                onClick={() => void loginWithGoogle()}
+                className="rounded-lg bg-white/10 px-3 py-1.5 text-xs font-semibold text-white hover:bg-white/20 disabled:opacity-60 shrink-0 inline-flex items-center gap-1.5"
+              >
+                {signingIn && <Loader2 className="h-3 w-3 animate-spin" />}
+                {signingIn ? 'Signing in...' : 'Sign in with Google'}
+              </button>
+            )}
+          </div>
+          {authError && (
+            <p className="text-[11px] text-rose-300">{authError}</p>
+          )}
+        </div>
+
         <div className="flex items-start gap-2.5">
           <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-cyan-300" />
           <p>
-            Stored locally in your browser via <span className="font-mono-num text-slate-200">localStorage</span>. No account, server, or tracking is used.
+            Stored locally in your browser and synced privately to your Gmail account when signed in.
           </p>
         </div>
         <p className="text-slate-400">

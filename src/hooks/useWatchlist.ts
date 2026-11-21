@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { CloudSyncStatus } from '../contexts/FirebaseContext';
+import {
+  deleteCloudWatchlistItem,
+  fetchAllCloudWatchlist,
+  makeWatchlistDocId,
+  subscribeCloudWatchlist,
+  updateCloudSeriesProgress,
+  upsertCloudWatchlistItem,
+} from '../services/cloudSync';
 import { vaultSetItem } from '../services/persistentStorage';
 import { GENRE_CHIPS } from '../services/tmdb';
 import { GenreChipId, MediaType, TmdbMediaItem, WatchlistEntry } from '../types/tmdb';
@@ -13,6 +22,7 @@ const KEYS = {
   watchedMovies: 'watched_movies',
   watchedSeries: 'watched_series',
   genreAffinity: 'cinedeck_genre_affinity',
+  lastCloudUid: 'moviac_last_cloud_uid',
 } as const;
 
 function readList(key: string): WatchlistEntry[] {
@@ -41,7 +51,10 @@ function readAffinity(): Record<string, number> {
   }
 }
 
-function toWatchlistEntry(item: TmdbMediaItem, existingProgress?: { season: number; episode: number }): WatchlistEntry {
+function toWatchlistEntry(
+  item: TmdbMediaItem,
+  existingProgress?: { season: number; episode: number }
+): WatchlistEntry {
   return {
     id: item.id,
     title: item.title,
@@ -58,7 +71,14 @@ function toWatchlistEntry(item: TmdbMediaItem, existingProgress?: { season: numb
   };
 }
 
-export function useWatchlist() {
+interface UseWatchlistOptions {
+  cloudUid?: string | null;
+  onSyncStatusChange?: (status: CloudSyncStatus) => void;
+}
+
+export function useWatchlist(options: UseWatchlistOptions = {}) {
+  const { cloudUid = null, onSyncStatusChange } = options;
+
   const [watchingMovies, setWatchingMovies] = useState<WatchlistEntry[]>(() =>
     readList(KEYS.watchingMovies)
   );
@@ -80,6 +100,24 @@ export function useWatchlist() {
   const [genreAffinity, setGenreAffinity] = useState<Record<string, number>>(() =>
     readAffinity()
   );
+
+  // Keep latest local lists accessible inside async cloud handshake without re-subscribing
+  const listsRef = useRef({
+    watchingMovies,
+    watchingSeries,
+    watchlistMovies,
+    watchlistSeries,
+    watchedMovies,
+    watchedSeries,
+  });
+  listsRef.current = {
+    watchingMovies,
+    watchingSeries,
+    watchlistMovies,
+    watchlistSeries,
+    watchedMovies,
+    watchedSeries,
+  };
 
   useEffect(() => {
     writeList(KEYS.watchingMovies, watchingMovies);
@@ -109,6 +147,128 @@ export function useWatchlist() {
     vaultSetItem(KEYS.genreAffinity, JSON.stringify(genreAffinity));
   }, [genreAffinity]);
 
+  // Real-time Firestore synchronization when signed in with Gmail
+  useEffect(() => {
+    if (!cloudUid) return;
+
+    let cancelled = false;
+    let unsub: (() => void) | null = null;
+
+    const runCloudSync = async () => {
+      onSyncStatusChange?.('syncing');
+      try {
+        const previousUid = localStorage.getItem(KEYS.lastCloudUid);
+        const shouldUploadLocalItems = !previousUid || previousUid === cloudUid;
+
+        const existingCloud = await fetchAllCloudWatchlist(cloudUid);
+        if (cancelled) return;
+
+        const cloudKeys = new Set(existingCloud.map((r) => r.itemKey));
+
+        if (shouldUploadLocalItems) {
+          const snapshot = listsRef.current;
+          const pendingUploads: Array<{ entry: WatchlistEntry; status: WatchlistStatus }> = [];
+
+          const queueMissing = (items: WatchlistEntry[], status: WatchlistStatus) => {
+            for (const entry of items) {
+              const key = makeWatchlistDocId(entry.media_type, entry.id);
+              if (!cloudKeys.has(key)) {
+                cloudKeys.add(key);
+                pendingUploads.push({ entry, status });
+              }
+            }
+          };
+
+          queueMissing(snapshot.watchingMovies, 'watching');
+          queueMissing(snapshot.watchingSeries, 'watching');
+          queueMissing(snapshot.watchlistMovies, 'to-watch');
+          queueMissing(snapshot.watchlistSeries, 'to-watch');
+          queueMissing(snapshot.watchedMovies, 'watched');
+          queueMissing(snapshot.watchedSeries, 'watched');
+
+          if (pendingUploads.length > 0) {
+            await Promise.all(
+              pendingUploads.map(({ entry, status }) =>
+                upsertCloudWatchlistItem(cloudUid, entry, status)
+              )
+            );
+          }
+        }
+
+        if (cancelled) return;
+        vaultSetItem(KEYS.lastCloudUid, cloudUid);
+
+        unsub = subscribeCloudWatchlist(
+          cloudUid,
+          (records) => {
+            if (cancelled) return;
+            const nextWatchingMovies: WatchlistEntry[] = [];
+            const nextWatchingSeries: WatchlistEntry[] = [];
+            const nextWatchlistMovies: WatchlistEntry[] = [];
+            const nextWatchlistSeries: WatchlistEntry[] = [];
+            const nextWatchedMovies: WatchlistEntry[] = [];
+            const nextWatchedSeries: WatchlistEntry[] = [];
+
+            for (const rec of records) {
+              if (rec.entry.media_type === 'movie') {
+                if (rec.status === 'watching') nextWatchingMovies.push(rec.entry);
+                else if (rec.status === 'watched') nextWatchedMovies.push(rec.entry);
+                else nextWatchlistMovies.push(rec.entry);
+              } else {
+                if (rec.status === 'watching') nextWatchingSeries.push(rec.entry);
+                else if (rec.status === 'watched') nextWatchedSeries.push(rec.entry);
+                else nextWatchlistSeries.push(rec.entry);
+              }
+            }
+
+            const byRecent = (a: WatchlistEntry, b: WatchlistEntry) => b.addedAt - a.addedAt;
+            setWatchingMovies(nextWatchingMovies.sort(byRecent));
+            setWatchingSeries(nextWatchingSeries.sort(byRecent));
+            setWatchlistMovies(nextWatchlistMovies.sort(byRecent));
+            setWatchlistSeries(nextWatchlistSeries.sort(byRecent));
+            setWatchedMovies(nextWatchedMovies.sort(byRecent));
+            setWatchedSeries(nextWatchedSeries.sort(byRecent));
+            onSyncStatusChange?.('synced');
+          },
+          () => {
+            if (!cancelled) onSyncStatusChange?.('error');
+          }
+        );
+      } catch {
+        if (!cancelled) onSyncStatusChange?.('error');
+      }
+    };
+
+    void runCloudSync();
+
+    return () => {
+      cancelled = true;
+      if (unsub) unsub();
+    };
+  }, [cloudUid, onSyncStatusChange]);
+
+  const syncUpsert = useCallback(
+    (entry: WatchlistEntry, status: WatchlistStatus) => {
+      if (!cloudUid) return;
+      onSyncStatusChange?.('syncing');
+      upsertCloudWatchlistItem(cloudUid, entry, status)
+        .then(() => onSyncStatusChange?.('synced'))
+        .catch(() => onSyncStatusChange?.('error'));
+    },
+    [cloudUid, onSyncStatusChange]
+  );
+
+  const syncDelete = useCallback(
+    (mediaType: MediaType, id: number) => {
+      if (!cloudUid) return;
+      onSyncStatusChange?.('syncing');
+      deleteCloudWatchlistItem(cloudUid, mediaType, id)
+        .then(() => onSyncStatusChange?.('synced'))
+        .catch(() => onSyncStatusChange?.('error'));
+    },
+    [cloudUid, onSyncStatusChange]
+  );
+
   const recordGenreSelection = useCallback((chipIds: GenreChipId[]) => {
     if (chipIds.length === 0) return;
     setGenreAffinity((prev) => {
@@ -119,6 +279,19 @@ export function useWatchlist() {
         for (const gid of [...cfg.fallbackMovieIds, ...cfg.fallbackTvIds]) {
           const key = String(gid);
           next[key] = (next[key] || 0) + 1;
+        }
+      }
+      return next;
+    });
+  }, []);
+
+  const mergeCloudGenreAffinity = useCallback((cloudAffinity: Record<string, number>) => {
+    if (!cloudAffinity || typeof cloudAffinity !== 'object') return;
+    setGenreAffinity((prev) => {
+      const next = { ...prev };
+      for (const [k, val] of Object.entries(cloudAffinity)) {
+        if (typeof val === 'number' && Number.isFinite(val)) {
+          next[k] = Math.max(next[k] || 0, val);
         }
       }
       return next;
@@ -152,71 +325,96 @@ export function useWatchlist() {
   const toggleWatching = useCallback(
     (item: TmdbMediaItem) => {
       if (item.media_type === 'movie') {
-        setWatchingMovies((prev) => {
-          const exists = prev.some((i) => i.id === item.id);
-          if (exists) return prev.filter((i) => i.id !== item.id);
-          setWatchlistMovies((wl) => wl.filter((i) => i.id !== item.id));
-          setWatchedMovies((wd) => wd.filter((i) => i.id !== item.id));
-          return [toWatchlistEntry(item), ...prev];
-        });
+        const exists = watchingMovies.some((i) => i.id === item.id);
+        if (exists) {
+          setWatchingMovies((prev) => prev.filter((i) => i.id !== item.id));
+          syncDelete('movie', item.id);
+        } else {
+          const entry = toWatchlistEntry(item);
+          setWatchingMovies((prev) => [entry, ...prev.filter((i) => i.id !== item.id)]);
+          setWatchlistMovies((prev) => prev.filter((i) => i.id !== item.id));
+          setWatchedMovies((prev) => prev.filter((i) => i.id !== item.id));
+          syncUpsert(entry, 'watching');
+        }
       } else {
-        const existingProgress = watchlistSeries.find((i) => i.id === item.id)?.progress;
-        setWatchingSeries((prev) => {
-          const exists = prev.some((i) => i.id === item.id);
-          if (exists) return prev.filter((i) => i.id !== item.id);
-          setWatchlistSeries((wl) => wl.filter((i) => i.id !== item.id));
-          setWatchedSeries((wd) => wd.filter((i) => i.id !== item.id));
-          return [toWatchlistEntry(item, existingProgress), ...prev];
-        });
+        const exists = watchingSeries.some((i) => i.id === item.id);
+        if (exists) {
+          setWatchingSeries((prev) => prev.filter((i) => i.id !== item.id));
+          syncDelete('tv', item.id);
+        } else {
+          const existingProgress = watchlistSeries.find((i) => i.id === item.id)?.progress;
+          const entry = toWatchlistEntry(item, existingProgress);
+          setWatchingSeries((prev) => [entry, ...prev.filter((i) => i.id !== item.id)]);
+          setWatchlistSeries((prev) => prev.filter((i) => i.id !== item.id));
+          setWatchedSeries((prev) => prev.filter((i) => i.id !== item.id));
+          syncUpsert(entry, 'watching');
+        }
       }
     },
-    [watchlistSeries]
+    [watchingMovies, watchingSeries, watchlistSeries, syncDelete, syncUpsert]
   );
 
   const toggleWatchlist = useCallback(
     (item: TmdbMediaItem) => {
       if (item.media_type === 'movie') {
-        setWatchlistMovies((prev) => {
-          const exists = prev.some((i) => i.id === item.id);
-          if (exists) return prev.filter((i) => i.id !== item.id);
-          setWatchingMovies((wt) => wt.filter((i) => i.id !== item.id));
-          setWatchedMovies((wd) => wd.filter((i) => i.id !== item.id));
-          return [toWatchlistEntry(item), ...prev];
-        });
+        const exists = watchlistMovies.some((i) => i.id === item.id);
+        if (exists) {
+          setWatchlistMovies((prev) => prev.filter((i) => i.id !== item.id));
+          syncDelete('movie', item.id);
+        } else {
+          const entry = toWatchlistEntry(item);
+          setWatchlistMovies((prev) => [entry, ...prev.filter((i) => i.id !== item.id)]);
+          setWatchingMovies((prev) => prev.filter((i) => i.id !== item.id));
+          setWatchedMovies((prev) => prev.filter((i) => i.id !== item.id));
+          syncUpsert(entry, 'to-watch');
+        }
       } else {
-        const existingProgress = watchingSeries.find((i) => i.id === item.id)?.progress;
-        setWatchlistSeries((prev) => {
-          const exists = prev.some((i) => i.id === item.id);
-          if (exists) return prev.filter((i) => i.id !== item.id);
-          setWatchingSeries((wt) => wt.filter((i) => i.id !== item.id));
-          setWatchedSeries((wd) => wd.filter((i) => i.id !== item.id));
-          return [toWatchlistEntry(item, existingProgress), ...prev];
-        });
+        const exists = watchlistSeries.some((i) => i.id === item.id);
+        if (exists) {
+          setWatchlistSeries((prev) => prev.filter((i) => i.id !== item.id));
+          syncDelete('tv', item.id);
+        } else {
+          const existingProgress = watchingSeries.find((i) => i.id === item.id)?.progress;
+          const entry = toWatchlistEntry(item, existingProgress);
+          setWatchlistSeries((prev) => [entry, ...prev.filter((i) => i.id !== item.id)]);
+          setWatchingSeries((prev) => prev.filter((i) => i.id !== item.id));
+          setWatchedSeries((prev) => prev.filter((i) => i.id !== item.id));
+          syncUpsert(entry, 'to-watch');
+        }
       }
     },
-    [watchingSeries]
+    [watchlistMovies, watchlistSeries, watchingSeries, syncDelete, syncUpsert]
   );
 
-  const toggleWatched = useCallback((item: TmdbMediaItem) => {
-    const entry = toWatchlistEntry(item);
-    if (item.media_type === 'movie') {
-      setWatchedMovies((prev) => {
-        const exists = prev.some((i) => i.id === item.id);
-        if (exists) return prev.filter((i) => i.id !== item.id);
-        setWatchlistMovies((wl) => wl.filter((i) => i.id !== item.id));
-        setWatchingMovies((wt) => wt.filter((i) => i.id !== item.id));
-        return [entry, ...prev];
-      });
-    } else {
-      setWatchedSeries((prev) => {
-        const exists = prev.some((i) => i.id === item.id);
-        if (exists) return prev.filter((i) => i.id !== item.id);
-        setWatchlistSeries((wl) => wl.filter((i) => i.id !== item.id));
-        setWatchingSeries((wt) => wt.filter((i) => i.id !== item.id));
-        return [entry, ...prev];
-      });
-    }
-  }, []);
+  const toggleWatched = useCallback(
+    (item: TmdbMediaItem) => {
+      const entry = toWatchlistEntry(item);
+      if (item.media_type === 'movie') {
+        const exists = watchedMovies.some((i) => i.id === item.id);
+        if (exists) {
+          setWatchedMovies((prev) => prev.filter((i) => i.id !== item.id));
+          syncDelete('movie', item.id);
+        } else {
+          setWatchedMovies((prev) => [entry, ...prev.filter((i) => i.id !== item.id)]);
+          setWatchlistMovies((prev) => prev.filter((i) => i.id !== item.id));
+          setWatchingMovies((prev) => prev.filter((i) => i.id !== item.id));
+          syncUpsert(entry, 'watched');
+        }
+      } else {
+        const exists = watchedSeries.some((i) => i.id === item.id);
+        if (exists) {
+          setWatchedSeries((prev) => prev.filter((i) => i.id !== item.id));
+          syncDelete('tv', item.id);
+        } else {
+          setWatchedSeries((prev) => [entry, ...prev.filter((i) => i.id !== item.id)]);
+          setWatchlistSeries((prev) => prev.filter((i) => i.id !== item.id));
+          setWatchingSeries((prev) => prev.filter((i) => i.id !== item.id));
+          syncUpsert(entry, 'watched');
+        }
+      }
+    },
+    [watchedMovies, watchedSeries, syncDelete, syncUpsert]
+  );
 
   const removeFromList = useCallback(
     (id: number, mediaType: MediaType, status: WatchlistStatus) => {
@@ -237,8 +435,9 @@ export function useWatchlist() {
           setWatchedSeries((prev) => prev.filter((i) => i.id !== id));
         }
       }
+      syncDelete(mediaType, id);
     },
-    []
+    [syncDelete]
   );
 
   const moveBetweenLists = useCallback(
@@ -285,6 +484,7 @@ export function useWatchlist() {
 
       setters[fromStatus]((prev) => prev.filter((i) => i.id !== id));
       setters[toStatus]((prev) => [updated, ...prev.filter((i) => i.id !== id)]);
+      syncUpsert(updated, toStatus);
     },
     [
       watchingMovies,
@@ -293,19 +493,30 @@ export function useWatchlist() {
       watchingSeries,
       watchlistSeries,
       watchedSeries,
+      syncUpsert,
     ]
   );
 
-  const updateSeriesProgress = useCallback((id: number, season: number, episode: number) => {
-    const safeSeason = Math.max(1, season);
-    const safeEpisode = Math.max(1, episode);
-    const apply = (prev: WatchlistEntry[]) =>
-      prev.map((item) =>
-        item.id === id ? { ...item, progress: { season: safeSeason, episode: safeEpisode } } : item
-      );
-    setWatchingSeries(apply);
-    setWatchlistSeries(apply);
-  }, []);
+  const updateSeriesProgress = useCallback(
+    (id: number, season: number, episode: number) => {
+      const safeSeason = Math.max(1, season);
+      const safeEpisode = Math.max(1, episode);
+      const apply = (prev: WatchlistEntry[]) =>
+        prev.map((item) =>
+          item.id === id ? { ...item, progress: { season: safeSeason, episode: safeEpisode } } : item
+        );
+      setWatchingSeries(apply);
+      setWatchlistSeries(apply);
+
+      if (cloudUid) {
+        onSyncStatusChange?.('syncing');
+        updateCloudSeriesProgress(cloudUid, id, safeSeason, safeEpisode)
+          .then(() => onSyncStatusChange?.('synced'))
+          .catch(() => onSyncStatusChange?.('error'));
+      }
+    },
+    [cloudUid, onSyncStatusChange]
+  );
 
   const getSeriesProgress = useCallback(
     (id: number): { season: number; episode: number } | undefined => {
@@ -399,42 +610,73 @@ export function useWatchlist() {
     watchedSeries,
   ]);
 
-  const importWatchlistsJson = useCallback((jsonText: string): { ok: boolean; message: string } => {
-    try {
-      const data = JSON.parse(jsonText);
-      if (!data || typeof data !== 'object') {
-        return { ok: false, message: 'Invalid JSON file format.' };
-      }
-
-      const mergeUnique = (existing: WatchlistEntry[], incoming: unknown, fallbackType: MediaType) => {
-        if (!Array.isArray(incoming)) return existing;
-        const map = new Map<number, WatchlistEntry>();
-        for (const item of existing) map.set(item.id, item);
-        for (const raw of incoming) {
-          if (raw && typeof raw === 'object' && typeof (raw as WatchlistEntry).id === 'number') {
-            const entry = raw as WatchlistEntry;
-            map.set(entry.id, {
-              ...entry,
-              media_type: entry.media_type || fallbackType,
-              addedAt: entry.addedAt || Date.now(),
-            });
-          }
+  const importWatchlistsJson = useCallback(
+    (jsonText: string): { ok: boolean; message: string } => {
+      try {
+        const data = JSON.parse(jsonText);
+        if (!data || typeof data !== 'object') {
+          return { ok: false, message: 'Invalid JSON file format.' };
         }
-        return Array.from(map.values()).sort((a, b) => b.addedAt - a.addedAt);
-      };
 
-      setWatchingMovies((prev) => mergeUnique(prev, data.watching_movies, 'movie'));
-      setWatchingSeries((prev) => mergeUnique(prev, data.watching_series, 'tv'));
-      setWatchlistMovies((prev) => mergeUnique(prev, data.watchlist_movies, 'movie'));
-      setWatchlistSeries((prev) => mergeUnique(prev, data.watchlist_series, 'tv'));
-      setWatchedMovies((prev) => mergeUnique(prev, data.watched_movies, 'movie'));
-      setWatchedSeries((prev) => mergeUnique(prev, data.watched_series, 'tv'));
+        const mergeUnique = (
+          existing: WatchlistEntry[],
+          incoming: unknown,
+          fallbackType: MediaType
+        ) => {
+          if (!Array.isArray(incoming)) return existing;
+          const map = new Map<number, WatchlistEntry>();
+          for (const item of existing) map.set(item.id, item);
+          for (const raw of incoming) {
+            if (raw && typeof raw === 'object' && typeof (raw as WatchlistEntry).id === 'number') {
+              const entry = raw as WatchlistEntry;
+              map.set(entry.id, {
+                ...entry,
+                media_type: entry.media_type || fallbackType,
+                addedAt: entry.addedAt || Date.now(),
+              });
+            }
+          }
+          return Array.from(map.values()).sort((a, b) => b.addedAt - a.addedAt);
+        };
 
-      return { ok: true, message: 'Watchlists imported successfully.' };
-    } catch {
-      return { ok: false, message: 'Could not parse JSON file.' };
-    }
-  }, []);
+        const nextWatchingMovies = mergeUnique(listsRef.current.watchingMovies, data.watching_movies, 'movie');
+        const nextWatchingSeries = mergeUnique(listsRef.current.watchingSeries, data.watching_series, 'tv');
+        const nextWatchlistMovies = mergeUnique(listsRef.current.watchlistMovies, data.watchlist_movies, 'movie');
+        const nextWatchlistSeries = mergeUnique(listsRef.current.watchlistSeries, data.watchlist_series, 'tv');
+        const nextWatchedMovies = mergeUnique(listsRef.current.watchedMovies, data.watched_movies, 'movie');
+        const nextWatchedSeries = mergeUnique(listsRef.current.watchedSeries, data.watched_series, 'tv');
+
+        setWatchingMovies(nextWatchingMovies);
+        setWatchingSeries(nextWatchingSeries);
+        setWatchlistMovies(nextWatchlistMovies);
+        setWatchlistSeries(nextWatchlistSeries);
+        setWatchedMovies(nextWatchedMovies);
+        setWatchedSeries(nextWatchedSeries);
+
+        if (cloudUid) {
+          onSyncStatusChange?.('syncing');
+          const syncAll: Array<{ entry: WatchlistEntry; status: WatchlistStatus }> = [
+            ...nextWatchingMovies.map((entry) => ({ entry, status: 'watching' as const })),
+            ...nextWatchingSeries.map((entry) => ({ entry, status: 'watching' as const })),
+            ...nextWatchlistMovies.map((entry) => ({ entry, status: 'to-watch' as const })),
+            ...nextWatchlistSeries.map((entry) => ({ entry, status: 'to-watch' as const })),
+            ...nextWatchedMovies.map((entry) => ({ entry, status: 'watched' as const })),
+            ...nextWatchedSeries.map((entry) => ({ entry, status: 'watched' as const })),
+          ];
+          Promise.all(
+            syncAll.map(({ entry, status }) => upsertCloudWatchlistItem(cloudUid, entry, status))
+          )
+            .then(() => onSyncStatusChange?.('synced'))
+            .catch(() => onSyncStatusChange?.('error'));
+        }
+
+        return { ok: true, message: 'Watchlists imported successfully.' };
+      } catch {
+        return { ok: false, message: 'Could not parse JSON file.' };
+      }
+    },
+    [cloudUid, onSyncStatusChange]
+  );
 
   return {
     watchingMovies,
@@ -443,6 +685,8 @@ export function useWatchlist() {
     watchlistSeries,
     watchedMovies,
     watchedSeries,
+    genreAffinity,
+    mergeCloudGenreAffinity,
     isWatching,
     isInWatchlist,
     isWatched,

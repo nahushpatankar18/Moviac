@@ -4,8 +4,11 @@ import {
   ArrowDownUp,
   Bookmark,
   Check,
+  CheckCircle2,
+  Cloud,
   Download,
   Film,
+  Loader2,
   Minus,
   Play,
   Plus,
@@ -15,6 +18,7 @@ import {
   Tv,
   Upload,
 } from 'lucide-react';
+import { useFirebaseAuth } from '../contexts/FirebaseContext';
 import { WatchlistStatus } from '../hooks/useWatchlist';
 import { getPosterUrl } from '../services/tmdb';
 import { MediaType, TmdbMediaItem, WatchlistEntry } from '../types/tmdb';
@@ -78,6 +82,7 @@ export const MyLists: React.FC<MyListsProps> = ({
   const [sortBy, setSortBy] = useState<SortOption>('recent');
   const [importNotice, setImportNotice] = useState<{ ok: boolean; text: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const { user, signingIn, syncStatus, loginWithGoogle } = useFirebaseAuth();
 
   const movieTotal = watchingMovies.length + watchlistMovies.length + watchedMovies.length;
   const seriesTotal = watchingSeries.length + watchlistSeries.length + watchedSeries.length;
@@ -299,7 +304,9 @@ export const MyLists: React.FC<MyListsProps> = ({
             My Watchlists
           </h1>
           <p className="mt-1 text-sm text-slate-400">
-            Movies and Web Series are kept cleanly separated in your browser storage.
+            {user
+              ? `Saved permanently to ${user.email} and cached offline.`
+              : 'Movies and Web Series are kept cleanly separated. Sign in with Gmail to save permanently.'}
           </p>
         </div>
 
@@ -331,6 +338,56 @@ export const MyLists: React.FC<MyListsProps> = ({
           />
         </div>
       </div>
+
+      {/* Gmail Cloud Sync Banner */}
+      {!user ? (
+        <div className="glass-surface flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-cyan-400/30 bg-cyan-500/10 px-4 py-3.5">
+          <div className="flex items-start gap-3">
+            <Cloud className="mt-0.5 h-5 w-5 shrink-0 text-cyan-300" />
+            <div>
+              <p className="text-sm font-semibold text-white">
+                Save your watchlists permanently with Gmail
+              </p>
+              <p className="text-xs text-slate-300">
+                Sign in with your Google account so your Watching, To Watch, and Watched lists never reset on mobile or Netlify.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            disabled={signingIn}
+            onClick={() => void loginWithGoogle()}
+            className="accent-gradient inline-flex items-center gap-2 rounded-xl px-4 py-2 text-xs font-semibold text-white shadow-md shadow-cyan-500/20 hover:brightness-110 disabled:opacity-60"
+          >
+            {signingIn ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Cloud className="h-3.5 w-3.5" />
+            )}
+            {signingIn ? 'Connecting...' : 'Select Gmail & Sync'}
+          </button>
+        </div>
+      ) : (
+        <div className="glass-surface flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-emerald-400/25 bg-emerald-500/10 px-4 py-2.5 text-xs">
+          <div className="flex items-center gap-2 text-emerald-200">
+            {syncStatus === 'syncing' || syncStatus === 'connecting' ? (
+              <Loader2 className="h-4 w-4 animate-spin text-cyan-300" />
+            ) : (
+              <CheckCircle2 className="h-4 w-4 text-emerald-400" />
+            )}
+            <span>
+              Cloud sync active for <strong className="text-white">{user.email}</strong>
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => void loginWithGoogle()}
+            className="text-cyan-300 hover:text-cyan-200 font-semibold"
+          >
+            Switch Gmail
+          </button>
+        </div>
+      )}
 
       {importNotice && (
         <div

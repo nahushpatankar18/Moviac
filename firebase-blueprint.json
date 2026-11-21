@@ -1,0 +1,206 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile document isolated to the owner.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID matching the document ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "User email address from Google Sign-In.",
+          "maxLength": 254
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User display name.",
+          "maxLength": 120
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "User profile avatar URL.",
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when profile was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when profile was last updated."
+        }
+      },
+      "required": ["uid", "email", "displayName", "photoURL", "createdAt", "updatedAt"]
+    },
+    "WatchlistItem": {
+      "title": "WatchlistItem",
+      "description": "A movie or web series tracked in Watching, To Watch, or Watched.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Owner UID matching parent userId.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "tmdbId": {
+          "type": "integer",
+          "description": "TMDB numeric media identifier."
+        },
+        "mediaType": {
+          "type": "string",
+          "enum": ["movie", "tv"],
+          "description": "Media format."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["watching", "to-watch", "watched"],
+          "description": "Watchlist bucket status."
+        },
+        "title": {
+          "type": "string",
+          "description": "Movie or series title.",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "posterPath": {
+          "type": "string",
+          "description": "TMDB relative poster path or empty string.",
+          "maxLength": 300
+        },
+        "backdropPath": {
+          "type": "string",
+          "description": "TMDB relative backdrop path or empty string.",
+          "maxLength": 300
+        },
+        "year": {
+          "type": "string",
+          "description": "Release year string.",
+          "maxLength": 16
+        },
+        "voteAverage": {
+          "type": "number",
+          "description": "TMDB rating 0 to 10."
+        },
+        "genreIds": {
+          "type": "array",
+          "description": "Bounded list of up to 15 TMDB genre IDs."
+        },
+        "addedAt": {
+          "type": "number",
+          "description": "Client epoch ms timestamp for chronological sorting."
+        },
+        "season": {
+          "type": "integer",
+          "description": "Current season number (>= 1)."
+        },
+        "episode": {
+          "type": "integer",
+          "description": "Current episode number (>= 1)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when entry was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when entry was updated."
+        }
+      },
+      "required": [
+        "ownerId",
+        "tmdbId",
+        "mediaType",
+        "status",
+        "title",
+        "posterPath",
+        "backdropPath",
+        "year",
+        "voteAverage",
+        "genreIds",
+        "addedAt",
+        "season",
+        "episode",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserPreferences": {
+      "title": "UserPreferences",
+      "description": "Private synced settings including TMDB API key, recent searches, and genre affinity.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "Owner UID matching parent userId.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "tmdbApiKey": {
+          "type": "string",
+          "description": "User TMDB API v3 key or Read Access Token.",
+          "maxLength": 512
+        },
+        "recentSearches": {
+          "type": "array",
+          "description": "Up to 10 recent search terms."
+        },
+        "genreAffinity": {
+          "type": "object",
+          "description": "Genre score map (up to 30 keys)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when preferences were created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when preferences were last updated."
+        }
+      },
+      "required": [
+        "ownerId",
+        "tmdbApiKey",
+        "recentSearches",
+        "genreAffinity",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "Private user profile keyed by Firebase Auth UID."
+    },
+    "/users/{userId}/watchlist/{itemKey}": {
+      "schema": {
+        "$ref": "#/entities/WatchlistItem"
+      },
+      "description": "User watchlist items keyed by {mediaType}_{tmdbId}."
+    },
+    "/users/{userId}/preferences/{prefId}": {
+      "schema": {
+        "$ref": "#/entities/UserPreferences"
+      },
+      "description": "User preferences document (prefId = 'main')."
+    }
+  }
+}

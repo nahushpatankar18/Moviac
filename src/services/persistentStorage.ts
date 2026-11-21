@@ -11,6 +11,7 @@ export const VAULT_KEYS = [
   'watched_series',
   'cinedeck_genre_affinity',
   'cinedeck_recent_searches',
+  'moviac_last_cloud_uid',
 ] as const;
 
 function isEffectivelyEmpty(val: string | null): boolean {

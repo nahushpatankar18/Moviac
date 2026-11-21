@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, MotionConfig, motion } from 'motion/react';
-import { AlertTriangle, Info, RefreshCw } from 'lucide-react';
+import { AlertTriangle, Info, RefreshCw, X } from 'lucide-react';
 import { ApiKeySetup } from './components/ApiKeySetup';
 import { DetailModal } from './components/DetailModal';
 import { GenreBar } from './components/GenreBar';
@@ -11,14 +11,17 @@ import { OfflineIndicator } from './components/OfflineIndicator';
 import { Row } from './components/Row';
 import { SearchResultsPanel } from './components/SearchBar';
 import { TypeTabs } from './components/TypeTabs';
+import { useFirebaseAuth } from './contexts/FirebaseContext';
 import { useMedia } from './hooks/useMedia';
 import { useSearch } from './hooks/useSearch';
 import { useWatchlist } from './hooks/useWatchlist';
+import { fetchCloudPreferences, saveCloudPreferences } from './services/cloudSync';
 import {
   GENRE_CHIPS,
   getBackdropUrl,
   getStoredApiKey,
   getSurprisePick,
+  saveApiKey,
   TmdbError,
 } from './services/tmdb';
 import {
@@ -59,7 +62,12 @@ export default function App() {
   const [activeBackdropPath, setActiveBackdropPath] = useState<string | null>(null);
   const [surprising, setSurprising] = useState(false);
 
-  const watchlist = useWatchlist();
+  const { profileReadyUid, setSyncStatus, authError, clearAuthError } = useFirebaseAuth();
+
+  const watchlist = useWatchlist({
+    cloudUid: profileReadyUid,
+    onSyncStatusChange: setSyncStatus,
+  });
   const search = useSearch(hasApiKey);
 
   const media = useMedia(
@@ -70,6 +78,62 @@ export default function App() {
     watchlist.topGenreIds,
     watchlist.allWatchlistSeeds
   );
+
+  // Sync TMDB API key & genre affinity with Firestore preferences when signed in
+  const prefsHydratedUidRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!profileReadyUid) {
+      prefsHydratedUidRef.current = null;
+      return;
+    }
+    let cancelled = false;
+    fetchCloudPreferences(profileReadyUid)
+      .then(async (cloudPrefs) => {
+        if (cancelled) return;
+        const localKey = getStoredApiKey();
+        if (cloudPrefs?.tmdbApiKey && !localKey) {
+          saveApiKey(cloudPrefs.tmdbApiKey);
+          setHasApiKey(true);
+        }
+        if (cloudPrefs?.genreAffinity) {
+          watchlist.mergeCloudGenreAffinity(cloudPrefs.genreAffinity);
+        }
+        if (!cloudPrefs || (localKey && !cloudPrefs.tmdbApiKey)) {
+          await saveCloudPreferences(profileReadyUid, {
+            tmdbApiKey: localKey || cloudPrefs?.tmdbApiKey || '',
+            recentSearches: search.recentSearches,
+            genreAffinity: watchlist.genreAffinity,
+          });
+        }
+        if (!cancelled) {
+          prefsHydratedUidRef.current = profileReadyUid;
+        }
+      })
+      .catch(() => {
+        // non-blocking preference sync
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [profileReadyUid]);
+
+  // Persist genre affinity & recent search changes to cloud preferences (debounced)
+  useEffect(() => {
+    if (!profileReadyUid || prefsHydratedUidRef.current !== profileReadyUid) return;
+    const timer = setTimeout(() => {
+      void saveCloudPreferences(
+        profileReadyUid,
+        {
+          tmdbApiKey: getStoredApiKey(),
+          recentSearches: search.recentSearches,
+          genreAffinity: watchlist.genreAffinity,
+        },
+        ['recentSearches', 'genreAffinity']
+      ).catch(() => {});
+    }, 1500);
+    return () => clearTimeout(timer);
+  }, [profileReadyUid, search.recentSearches, watchlist.genreAffinity]);
 
   // Set default backdrop from spotlight item
   useEffect(() => {
@@ -213,7 +277,22 @@ export default function App() {
   if (!hasApiKey) {
     return (
       <MotionConfig reducedMotion="user">
-        <ApiKeySetup onSuccess={() => setHasApiKey(true)} />
+        <ApiKeySetup
+          onSuccess={() => {
+            setHasApiKey(true);
+            if (profileReadyUid) {
+              void saveCloudPreferences(
+                profileReadyUid,
+                {
+                  tmdbApiKey: getStoredApiKey(),
+                  recentSearches: search.recentSearches,
+                  genreAffinity: watchlist.genreAffinity,
+                },
+                ['tmdbApiKey']
+              ).catch(() => {});
+            }
+          }}
+        />
       </MotionConfig>
     );
   }
@@ -276,6 +355,27 @@ export default function App() {
 
         {/* Main Content */}
         <main className="relative z-10 pt-16 pb-20 md:pb-12">
+          {authError && (
+            <div className="mx-auto max-w-7xl px-4 pt-4 sm:px-6 lg:px-8">
+              <div
+                role="alert"
+                className="glass-surface flex items-center justify-between gap-3 rounded-2xl border border-rose-400/35 bg-rose-500/15 px-4 py-3 text-xs text-rose-100"
+              >
+                <div className="flex items-center gap-2.5">
+                  <AlertTriangle className="h-4 w-4 shrink-0 text-rose-300" />
+                  <span>{authError}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={clearAuthError}
+                  aria-label="Dismiss auth error"
+                  className="rounded-lg p-1 text-rose-200 hover:bg-white/10"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          )}
           {searchOpen ? (
             <SearchResultsPanel
               query={search.query}
@@ -563,6 +663,17 @@ export default function App() {
             onSuccess={() => {
               setShowSettingsModal(false);
               media.reloadFeed();
+              if (profileReadyUid) {
+                void saveCloudPreferences(
+                  profileReadyUid,
+                  {
+                    tmdbApiKey: getStoredApiKey(),
+                    recentSearches: search.recentSearches,
+                    genreAffinity: watchlist.genreAffinity,
+                  },
+                  ['tmdbApiKey']
+                ).catch(() => {});
+              }
             }}
           />
         )}

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Bookmark, Compass, Film, Settings, Tv } from 'lucide-react';
 import { ContentFilter } from '../types/tmdb';
+import { GoogleAccountButton } from './GoogleAccountButton';
 import { PWAInstallButton } from './PWAInstallButton';
 import { SearchBar } from './SearchBar';
 
@@ -57,8 +58,9 @@ export const Navbar: React.FC<NavbarProps> = ({
             />
           </div>
 
-          {/* Mobile Compact Install Trigger */}
-          <div className="md:hidden shrink-0">
+          {/* Mobile Compact Gmail & Install Triggers */}
+          <div className="flex items-center gap-1.5 md:hidden shrink-0">
+            <GoogleAccountButton compact />
             <PWAInstallButton compact />
           </div>
 
@@ -89,6 +91,8 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
 
             <PWAInstallButton />
+
+            <GoogleAccountButton />
 
             <button
               type="button"

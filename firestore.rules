@@ -1,0 +1,234 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net: deny all access by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Hardened Global Helpers
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function userDocExists(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId));
+    }
+
+    // Validation Blueprint: UserProfile (matches firebase-blueprint.json)
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'photoURL', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'createdAt', 'updatedAt'])
+        && data.uid is string
+        && isValidId(data.uid)
+        && data.uid == request.auth.uid
+        && data.uid == userId
+        && data.email is string
+        && data.email.size() <= 254
+        && data.displayName is string
+        && data.displayName.size() <= 120
+        && data.photoURL is string
+        && data.photoURL.size() <= 500
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: WatchlistItem (matches firebase-blueprint.json)
+    function isValidWatchlistItem(data, userId) {
+      return data.keys().hasAll([
+          'ownerId', 'tmdbId', 'mediaType', 'status', 'title',
+          'posterPath', 'backdropPath', 'year', 'voteAverage',
+          'genreIds', 'addedAt', 'season', 'episode', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'ownerId', 'tmdbId', 'mediaType', 'status', 'title',
+          'posterPath', 'backdropPath', 'year', 'voteAverage',
+          'genreIds', 'addedAt', 'season', 'episode', 'createdAt', 'updatedAt'
+        ])
+        && data.ownerId is string
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.ownerId == userId
+        && data.tmdbId is int
+        && data.tmdbId > 0
+        && data.mediaType is string
+        && data.mediaType in ['movie', 'tv']
+        && data.status is string
+        && data.status in ['watching', 'to-watch', 'watched']
+        && data.title is string
+        && data.title.size() >= 1
+        && data.title.size() <= 300
+        && data.posterPath is string
+        && data.posterPath.size() <= 300
+        && data.backdropPath is string
+        && data.backdropPath.size() <= 300
+        && data.year is string
+        && data.year.size() <= 16
+        && (data.voteAverage is int || data.voteAverage is float)
+        && data.voteAverage >= 0
+        && data.voteAverage <= 10
+        && data.genreIds is list
+        && data.genreIds.size() <= 15
+        && (data.genreIds.size() == 0 || data.genreIds[0] is int)
+        && (data.addedAt is int || data.addedAt is float)
+        && data.addedAt >= 0
+        && data.season is int
+        && data.season >= 1
+        && data.season <= 500
+        && data.episode is int
+        && data.episode >= 1
+        && data.episode <= 5000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // Validation Blueprint: UserPreferences (matches firebase-blueprint.json)
+    function isValidUserPreferences(data, userId) {
+      return data.keys().hasAll(['ownerId', 'tmdbApiKey', 'recentSearches', 'genreAffinity', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['ownerId', 'tmdbApiKey', 'recentSearches', 'genreAffinity', 'createdAt', 'updatedAt'])
+        && data.ownerId is string
+        && isValidId(data.ownerId)
+        && data.ownerId == request.auth.uid
+        && data.ownerId == userId
+        && data.tmdbApiKey is string
+        && data.tmdbApiKey.size() <= 512
+        && data.recentSearches is list
+        && data.recentSearches.size() <= 10
+        && (
+          data.recentSearches.size() == 0 ||
+          (data.recentSearches[0] is string && data.recentSearches[0].size() <= 120)
+        )
+        && data.genreAffinity is map
+        && data.genreAffinity.size() <= 30
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // /users/{userId} - Owner-only profile (list denied to prevent user enumeration)
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow create: if isSignedIn()
+        && isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isSignedIn()
+        && isValidId(userId)
+        && isOwner(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName', 'photoURL', 'updatedAt']);
+      allow delete: if isSignedIn() && isValidId(userId) && isOwner(userId);
+
+      // /users/{userId}/watchlist/{itemKey}
+      match /watchlist/{itemKey} {
+        allow get: if isValidId(userId)
+          && isValidId(itemKey)
+          && isOwner(userId)
+          && userDocExists(userId);
+        allow list: if isValidId(userId)
+          && isOwner(userId)
+          && existing().ownerId == request.auth.uid;
+        allow create: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(itemKey)
+          && isOwner(userId)
+          && isValidWatchlistItem(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && userDocExists(userId);
+        allow update: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(itemKey)
+          && isOwner(userId)
+          && isValidWatchlistItem(incoming(), userId)
+          && userDocExists(userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().tmdbId == existing().tmdbId
+          && incoming().mediaType == existing().mediaType
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            // Action: Move status between watching / to-watch / watched
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'addedAt', 'season', 'episode', 'updatedAt']) ||
+            // Action: Update series season/episode progress
+            incoming().diff(existing()).affectedKeys().hasOnly(['season', 'episode', 'updatedAt']) ||
+            // Action: Full item metadata sync / JSON import merge
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'title', 'posterPath', 'backdropPath', 'year',
+              'voteAverage', 'genreIds', 'addedAt', 'season', 'episode', 'updatedAt'
+            ])
+          );
+        allow delete: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(itemKey)
+          && isOwner(userId)
+          && userDocExists(userId);
+      }
+
+      // /users/{userId}/preferences/{prefId}
+      match /preferences/{prefId} {
+        allow get: if isValidId(userId)
+          && isValidId(prefId)
+          && prefId == 'main'
+          && isOwner(userId)
+          && userDocExists(userId);
+        allow create: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(prefId)
+          && prefId == 'main'
+          && isOwner(userId)
+          && isValidUserPreferences(incoming(), userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && userDocExists(userId);
+        allow update: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(prefId)
+          && prefId == 'main'
+          && isOwner(userId)
+          && isValidUserPreferences(incoming(), userId)
+          && userDocExists(userId)
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            // Action: Update TMDB API key
+            incoming().diff(existing()).affectedKeys().hasOnly(['tmdbApiKey', 'updatedAt']) ||
+            // Action: Update recent searches
+            incoming().diff(existing()).affectedKeys().hasOnly(['recentSearches', 'updatedAt']) ||
+            // Action: Update genre affinity scores
+            incoming().diff(existing()).affectedKeys().hasOnly(['genreAffinity', 'updatedAt']) ||
+            // Action: Sync all preferences together
+            incoming().diff(existing()).affectedKeys().hasOnly(['tmdbApiKey', 'recentSearches', 'genreAffinity', 'updatedAt'])
+          );
+        allow delete: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(prefId)
+          && prefId == 'main'
+          && isOwner(userId)
+          && userDocExists(userId);
+      }
+    }
+  }
+}
